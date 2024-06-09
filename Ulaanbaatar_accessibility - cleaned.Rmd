@@ -1326,7 +1326,7 @@ breaks_scale <- levels(base$breaks) %>% as.numeric()
 PlotMap()
 ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
 
-xsvariable <- base$tm90_c_
+variable <- base$tm90_c_
 name_variable <- "90-min. accessibility | Schools"
 threshold <- "tm90_cs"
 base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
