@@ -1,0 +1,1338 @@
+---
+title: "Accessibility in Ulaanbaatar"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# 1. Importing the libraries we need to run the script
+```{r, include = F}
+
+## If you don't have all the libraries, please install them using install.packages("<package name>")
+### Example: install.packages("tidyverse")
+
+knitr::opts_chunk$set(echo = F, cache = T, warning = F, message = F, error = F)
+
+library(checkpoint)
+library(tidyverse)
+library(knitr)
+library(maptools)
+library(sf)
+library(sp)
+library(raster)
+library(spdep)
+library(purrr)
+library(lme4)
+library(jtools)
+library(merTools)
+library(spgwr)
+library(interflex)
+library(stargazer)
+library(devtools)
+library(tidyr)
+library(expss)
+library(MatchIt)
+library(broom)
+library(rgenoud)
+library(nngeo)
+library(ineq)
+library(lctools)
+library(DescTools)
+library(fs)
+library(stringr)
+#library(dbplyr)
+library(matrixStats)
+library(seg)
+library(acid)
+library(reldist)
+library(dineq)
+library(laeken)
+library(RColorBrewer)
+library(hrbrthemes)
+library(ggmap)
+library(gridExtra)
+library(osmdata)
+library(viridis)
+library(foreign)
+library(weights)
+library(splitstackshape)
+library(ergm)
+library(cowplot)
+library(rgdal)
+library(matchingR)
+library(rlist)
+library(lpSolve)
+library(geosphere)
+library(link2GI)
+#library(nnetpredint)
+library(rgeos)
+library(rgrass7)
+library(shp2graph)
+library(reshape2)
+library(biscale)
+library(SpatialPosition)
+library(rJava)
+library(Hmisc)
+#library(osmar)
+library(tidygraph)
+library(igraph)
+library(r5r)
+library(elevatr)
+library(leaflet)
+library(reticulate)
+library(read.dbc)
+library(ggnewscale)
+library(janitor)
+library(rmapshaper)
+library(DescTools)
+library(Hmisc)
+library(corrplot)
+library(GGally)
+library(h3jsr)
+library(readxl)
+library(tidytransit)
+library(spatialEco)
+library(terra)
+library(ggmap)
+
+mutate <- dplyr::mutate
+select <- dplyr::select
+filter <- dplyr::filter
+rename <- dplyr::rename
+distinct <- dplyr::distinct
+pull <- dplyr::pull
+summarize <- dplyr::summarize
+nest <- tidyr::nest
+
+is_outlier <- function(x) {
+  return(x < quantile(x, 0.25) - 1.5 * IQR(x) | x > quantile(x, 0.75) + 1.5 * IQR(x))}
+
+options(java.parameters = "-Xmx20G")
+Sys.setenv(JAVA_HOME="D:/Program Files/jdk-11")
+
+mode <- c("WALK","TRANSIT")
+max_walk_dist <- 100000
+max_trip_duration <- 6*60
+
+points_to_line <- function(data, long, lat, id_field = NULL, sort_field = NULL) {
+  
+  # Convert to SpatialPointsDataFrame
+  coordinates(data) <- c(long, lat)
+  
+  # If there is a sort field...
+  if (!is.null(sort_field)) {
+    if (!is.null(id_field)) {
+      data <- data[order(data[[id_field]], data[[sort_field]]), ]
+    } else {
+      data <- data[order(data[[sort_field]]), ]
+    }
+  }
+  
+  # If there is only one path...
+  if (is.null(id_field)) {
+    
+    lines <- SpatialLines(list(Lines(list(Line(data)), "id")))
+    
+    return(lines)
+    
+    # Now, if we have multiple lines...
+  } else if (!is.null(id_field)) {  
+    
+    # Split into a list by ID field
+    paths <- sp::split(data, data[[id_field]])
+    
+    sp_lines <- SpatialLines(list(Lines(list(Line(paths[[1]])), "line1")))
+    
+    # I like for loops, what can I say...
+    for (p in 2:length(paths)) {
+      id <- paste0("line", as.character(p))
+      l <- SpatialLines(list(Lines(list(Line(paths[[p]])), id)))
+      sp_lines <- spRbind(sp_lines, l)
+    }
+    
+    return(sp_lines)
+  }
+}
+
+
+
+setwd("G:/Meu Drive/World Bank/Ulaanbaatar")
+
+```
+
+# 2. GTFS: Identifying the stops along the routes
+```{r stops_shapes}
+
+# Reading stops and shapes in R
+stops <- st_read("Transit2024/stops.shp") %>%
+  st_transform(32646)%>%
+  mutate(route_id = gsub("1. Bus stop and route 2024 — ","",layer)) %>%
+  mutate(route_id = gsub( " .*$", "",route_id)) %>%
+  select(route_id,Name,layer) %>%
+  mutate(stop_id = 1:n())
+shapes <- st_read("Transit2024/shapes.shp") %>%
+  st_transform(32646) %>%
+  mutate(route_id = gsub("1. Bus stop and route 2024 — ","",layer)) %>%
+  mutate(route_id = gsub( " .*$", "",route_id)) %>%
+  select(route_id,Name,layer)
+
+# For each route, identify the stops near its itinerary (shape) and order them
+stop_times <- NULL
+for(i in shapes$route_id){
+  
+  st <- stops %>% filter(route_id == i)
+  sh <- shapes %>% filter(route_id == i)
+  
+  join <- st_join(st,sh %>% st_buffer(30))
+  
+  shape_pts <- st_cast(sh,"POINT") %>%
+  mutate(order = 1:n())
+  
+  pts_dist <- st_distance(join,shape_pts) %>% as_tibble()
+  colnames(pts_dist) <- shape_pts$order
+  
+  pts_dist <- pts_dist %>%
+    mutate(stop_id = st$stop_id) %>%
+    gather(key="stop_sequence",value="distance",-c(stop_id)) %>%
+    mutate(stop_sequence = as.numeric(stop_sequence)) %>%
+    group_by(stop_id) %>%
+    arrange(distance) %>%
+    filter(row_number() == 1) %>%
+    ungroup() %>%
+    arrange(stop_sequence) %>%
+    select(-distance) %>%
+    mutate(stop_sequence = 1:n()) %>%
+    mutate(route_id = i)
+    
+  stop_times <- bind_rows(stop_times,pts_dist)
+}
+
+stop_times <- stop_times %>%
+  mutate(route_id = gsub("а|a","А",route_id),
+         route_id = gsub("б|б","Б",route_id))
+
+# Organize the stops following the GTFS standard
+stops <- stops %>%
+  rename(stop_name = "Name") %>%
+  st_transform(4326) %>%
+  mutate(stop_lon = sf::st_coordinates(.)[,1],
+         stop_lat = sf::st_coordinates(.)[,2]) %>%
+  st_drop_geometry() %>%
+  select(stop_id,stop_name,stop_lon,stop_lat)
+
+rm(pts_dist,sh,shape_pts,st,join)
+
+```
+
+# 3. Create list of agencies and routes
+```{r agencies_routes}
+
+# Create an agency (in this case, public authority) responsible for the transit service
+agency <- tibble(agency_id = "UB",agency_name = "UB",agency_url = "http://bus.ub.gov.mn/new/", agency_timezone = "Asia/Ulaanbaatar")
+
+# Import the list of routes
+routes <- readxl::read_excel("Transit2024/3. Integrated assignment of round trip and duration for operator companies.xlsx") %>%
+  na.omit() %>%
+  separate_wider_delim(cols = `Route name`, delim = "(", names = c("route_id", "route_long_name")) %>%
+  mutate(route_long_name = gsub(")","",route_long_name),
+         route_id = gsub(" ","",route_id)) %>%
+  mutate(route_short_name = route_id,
+         agency_id = "UB") %>%
+  select(route_id,agency_id,route_short_name,route_long_name) %>%
+  mutate(route_type=3) %>%
+  mutate(route_id = case_when(route_id == "Ч:22Өвөл" ~ "Ч:22",
+                              TRUE ~ route_id)) %>%
+  mutate(route_id = gsub("а|a|a|A","А",route_id),
+         route_id = gsub("b|б|б","Б",route_id)) 
+
+# Remove duplicated entries
+routes <- routes[!duplicated(routes),] %>%
+  filter(route_long_name != "ЦагаанДЗ-Санс-Офицер")
+
+```
+
+# 4. Read and organize the timetables
+```{r timetable}
+
+# Function to read excel files
+multiplesheets <- function(fname) { 
+   
+  # getting info about all excel sheets 
+  
+  sheets <- readxl::excel_sheets(fname) 
+  tibble <- lapply(sheets, function(x) readxl::read_excel(fname, sheet = x)) 
+  data_frame <- lapply(tibble, as.data.frame) 
+    
+  # assigning names to data frames 
+  names(data_frame) <- sheets 
+    
+  # print data frame 
+  print(data_frame) 
+} 
+
+# Reading and organizing the data for each type of route
+#### M routes ####
+
+path <- "Transit2024/4.1. Public transport time table (M route).xlsx"
+timetable <- multiplesheets(path)
+sheets <- names(timetable)
+
+data <- NULL
+i <- 1 
+for(s in sheets){
+
+aux <- timetable[[s]] %>%
+  slice(-1)
+
+cols1 <- aux[1,] %>% t() %>% as_tibble() %>% fill(1) %>%  unlist()
+st <- c(cols1[4],cols1[6])
+cols1 <- c("","","",cols1[4:length(aux)])
+cols <- paste0(c("No","Stop","_Start",rep(c(1:100),each=4)),c("","","",rep(c("_Arrival","_Start"),400)))
+cols <- cols[1:length(aux)]
+cols <- paste0(cols,"_",cols1)
+
+aux <- aux[3:nrow(aux),]
+aux <- aux %>% mutate(ver = is.na(.[[1]])) %>% mutate(n = row_number())
+ntrue <- aux %>% filter(ver == "TRUE") %>% filter(n == min(n)) %>%
+  select(n) %>% unlist()
+aux <- aux %>% filter(n < ntrue) %>% select(-c(ver,n))
+#aux <- aux %>% filter(grepl(st[1],.[[1]]) | grepl(st[2],.[[1]]))
+
+colnames(aux) <- cols[1:length(aux)]
+aux <- tibble(aux[1:2],`_Arrival_`=aux$`_Start_`,aux[(3):ncol(aux)])
+#aux <- aux[,colSums(is.na(aux))<nrow(aux)]
+
+aux <- aux %>% gather(key = "ref",value = "time",-c(No_,Stop_)) %>%
+  mutate(time = as.numeric(time)) %>%
+  filter(time > 0) %>%
+  mutate(lap = gsub("_.*$","",ref)) %>%
+  mutate(station = sub(".*_","",ref)) %>%
+  mutate(ref = gsub(lap,"",ref))%>%
+  mutate(ref = gsub(st[1],"",ref))%>%
+  mutate(ref = gsub(st[2],"",ref)) %>%
+  mutate(ref = mapply(function(x,y)gsub(x,"",y) ,gsub(" ", "|",st[1]),ref)) %>%
+  mutate(ref = mapply(function(x,y)gsub(x,"",y) ,gsub(" ", "|",st[2]),ref)) %>%
+  mutate(ref = gsub("_","",ref)) %>%
+  mutate(ref = gsub('[0-9]+', '',ref)) %>%
+  filter(station %in% st) %>%
+  arrange(No_,station,time) %>%
+  group_by(No_,station) %>%
+  mutate(cycle = ifelse(ref == "Arrival",time - lag(time),0)) %>%
+  mutate(cycle = ifelse(ref == "Start",lead(cycle),cycle)) %>%
+  mutate(Stop_ = gsub("].*$","",Stop_)) %>%
+  mutate(Stop_ = sub(".*:","",Stop_)) %>%
+  mutate(Stop_ = as.numeric(Stop_)) %>%
+  rename(stop_id = "Stop_") %>%
+  tidyr::fill(cycle,.direction="up") %>%
+  tidyr::fill(cycle,.direction="down") %>%
+  mutate(stop_sequence = ifelse(station == st[1],1,NA))
+
+aux <- aux %>%
+  filter(stop_sequence == 1) %>%
+  mutate(route_id = gsub(" .*$","",sheets[i])) %>%
+  mutate(day = sub(".* ","",sheets[i]))
+  
+i <- i + 1
+
+data <- data %>% bind_rows(aux)
+
+print(paste0(gsub(" .*$","",sheets[i]),"-",i,"/",length(sheets)))
+
+}
+
+#### CH routes ####
+
+path <- "Transit2024/4.2. Public transport time table (CH route).xlsx"
+timetable <- multiplesheets(path)
+sheets <- names(timetable)
+
+i <- 1 
+for(s in sheets){
+
+aux <- timetable[[s]] %>%
+  slice(-1)
+
+cols1 <- aux[1,] %>% t() %>% as_tibble() %>% fill(1) %>%  unlist()
+st <- c(cols1[4],cols1[6])
+cols1 <- c("","","",cols1[4:length(aux)])
+cols <- paste0(c("No","Stop","_Start",rep(c(1:100),each=4)),c("","","",rep(c("_Arrival","_Start"),400)))
+cols <- cols[1:length(aux)]
+cols <- paste0(cols,"_",cols1)
+
+aux <- aux[3:nrow(aux),]
+aux <- aux %>% mutate(ver = is.na(.[[1]])) %>% mutate(n = row_number())
+ntrue <- aux %>% filter(ver == "TRUE") %>% filter(n == min(n)) %>%
+  select(n) %>% unlist()
+aux <- aux %>% filter(n < ntrue) %>% select(-c(ver,n))
+#aux <- aux %>% filter(grepl(st[1],.[[1]]) | grepl(st[2],.[[1]]))
+
+colnames(aux) <- cols[1:length(aux)]
+aux <- tibble(aux[1:2],`_Arrival_`=aux$`_Start_`,aux[(3):ncol(aux)])
+#aux <- aux[,colSums(is.na(aux))<nrow(aux)]
+
+aux <- aux %>% gather(key = "ref",value = "time",-c(No_,Stop_)) %>%
+  mutate(time = as.numeric(time)) %>%
+  filter(time > 0) %>%
+  mutate(lap = gsub("_.*$","",ref)) %>%
+  mutate(station = sub(".*_","",ref)) %>%
+  mutate(ref = gsub(lap,"",ref))%>%
+  mutate(ref = gsub(st[1],"",ref))%>%
+  mutate(ref = gsub(st[2],"",ref))%>%
+  mutate(ref = mapply(function(x,y)gsub(x,"",y) ,gsub(" ", "|",st[1]),ref)) %>%
+  mutate(ref = mapply(function(x,y)gsub(x,"",y) ,gsub(" ", "|",st[2]),ref)) %>%
+  mutate(ref = gsub("_","",ref)) %>%
+  mutate(ref = gsub('[0-9]+', '',ref)) %>%
+  filter(station %in% st) %>%
+  arrange(No_,station,time) %>%
+  group_by(No_,station) %>%
+  mutate(cycle = ifelse(ref == "Arrival",time - lag(time),0)) %>%
+  mutate(cycle = ifelse(ref == "Start",lead(cycle),cycle)) %>%
+  mutate(Stop_ = gsub("].*$","",Stop_)) %>%
+  mutate(Stop_ = sub(".*:","",Stop_)) %>%
+  mutate(Stop_ = as.numeric(Stop_)) %>%
+  rename(stop_id = "Stop_") %>%
+  tidyr::fill(cycle,.direction="up") %>%
+  tidyr::fill(cycle,.direction="down") %>%
+  mutate(stop_sequence = ifelse(station == st[1],1,NA))
+
+aux <- aux %>%
+  filter(stop_sequence == 1) %>%
+  mutate(route_id = gsub(" .*$","",sheets[i])) %>%
+  mutate(day = sub(".* ","",sheets[i]))
+  
+i <- i + 1
+
+data <- data %>% bind_rows(aux)
+
+print(paste0(gsub(" .*$","",sheets[i]),"-",i,"/",length(sheets)))
+
+}
+  
+#### Y routes ####
+
+path <- "Transit2024/4.3. Public transport time table (Y route).xlsx"
+timetable <- multiplesheets(path)
+sheets <- names(timetable)
+
+i <- 1 
+for(s in sheets){
+
+aux <- timetable[[s]] %>%
+  slice(-1)
+
+cols1 <- aux[1,] %>% t() %>% as_tibble() %>% fill(1) %>%  unlist()
+st <- c(cols1[4],cols1[6])
+cols1 <- c("","","",cols1[4:length(aux)])
+cols <- paste0(c("No","Stop","_Start",rep(c(1:100),each=4)),c("","","",rep(c("_Arrival","_Start"),400)))
+cols <- cols[1:length(aux)]
+cols <- paste0(cols,"_",cols1)
+
+aux <- aux[3:nrow(aux),]
+aux <- aux %>% mutate(ver = is.na(.[[1]])) %>% mutate(n = row_number())
+ntrue <- aux %>% filter(ver == "TRUE") %>% filter(n == min(n)) %>%
+  select(n) %>% unlist()
+aux <- aux %>% filter(n < ntrue) %>% select(-c(ver,n))
+#aux <- aux %>% filter(grepl(st[1],.[[1]]) | grepl(st[2],.[[1]]))
+
+colnames(aux) <- cols[1:length(aux)]
+aux <- tibble(aux[1:2],`_Arrival_`=aux$`_Start_`,aux[(3):ncol(aux)])
+#aux <- aux[,colSums(is.na(aux))<nrow(aux)]
+
+aux <- aux %>% gather(key = "ref",value = "time",-c(No_,Stop_)) %>%
+  mutate(time = as.numeric(time)) %>%
+  filter(time > 0) %>%
+  mutate(lap = gsub("_.*$","",ref)) %>%
+  mutate(station = sub(".*_","",ref)) %>%
+  mutate(ref = gsub(lap,"",ref))%>%
+  mutate(ref = gsub(st[1],"",ref))%>%
+  mutate(ref = gsub(st[2],"",ref)) %>%
+  mutate(ref = mapply(function(x,y)gsub(x,"",y) ,gsub(" ", "|",st[1]),ref)) %>%
+  mutate(ref = mapply(function(x,y)gsub(x,"",y) ,gsub(" ", "|",st[2]),ref)) %>%
+  mutate(ref = gsub("_","",ref)) %>%
+  mutate(ref = gsub('[0-9]+', '',ref)) %>%
+  filter(station %in% st) %>%
+  arrange(No_,station,time) %>%
+  group_by(No_,station) %>%
+  mutate(cycle = ifelse(ref == "Arrival",time - lag(time),0)) %>%
+  mutate(cycle = ifelse(ref == "Start",lead(cycle),cycle)) %>%
+  mutate(Stop_ = gsub("].*$","",Stop_)) %>%
+  mutate(Stop_ = sub(".*:","",Stop_)) %>%
+  mutate(Stop_ = as.numeric(Stop_)) %>%
+  rename(stop_id = "Stop_") %>%
+  tidyr::fill(cycle,.direction="up") %>%
+  tidyr::fill(cycle,.direction="down") %>%
+  mutate(stop_sequence = ifelse(station == st[1],1,NA))
+
+aux <- aux %>%
+  filter(stop_sequence == 1) %>%
+  mutate(route_id = gsub(" .*$","",sheets[i])) %>%
+  mutate(day = sub(".* ","",sheets[i]))
+  
+i <- i + 1
+
+data <- data %>% bind_rows(aux)
+
+print(paste0(gsub(" .*$","",sheets[i]),"-",i,"/",length(sheets)))
+
+}
+
+#### Sub-urban routes ####
+
+path <- "Transit2024/4.4. Public transport time table (sub-urban route).xlsx"
+timetable <- multiplesheets(path)
+sheets <- names(timetable)
+
+i <- 1 
+for(s in sheets){
+
+aux <- timetable[[s]] %>%
+  slice(-1)
+
+cols1 <- aux[1,] %>% t() %>% as_tibble() %>% fill(1) %>%  unlist()
+st <- c(cols1[4],cols1[6])
+cols1 <- c("","","",cols1[4:length(aux)])
+cols <- paste0(c("No","Stop","_Start",rep(c(1:100),each=4)),c("","","",rep(c("_Arrival","_Start"),400)))
+cols <- cols[1:length(aux)]
+cols <- paste0(cols,"_",cols1)
+
+aux <- aux[3:nrow(aux),]
+aux <- aux %>% mutate(ver = is.na(.[[1]])) %>% mutate(n = row_number())
+ntrue <- aux %>% filter(ver == "TRUE") %>% filter(n == min(n)) %>%
+  select(n) %>% unlist()
+aux <- aux %>% filter(n < ntrue) %>% select(-c(ver,n))
+#aux <- aux %>% filter(grepl(st[1],.[[1]]) | grepl(st[2],.[[1]]))
+
+colnames(aux) <- cols[1:length(aux)]
+aux <- tibble(aux[1:2],`_Arrival_`=aux$`_Start_`,aux[(3):ncol(aux)])
+#aux <- aux[,colSums(is.na(aux))<nrow(aux)]
+
+aux <- aux %>% gather(key = "ref",value = "time",-c(No_,Stop_)) %>%
+  mutate(time = as.numeric(time)) %>%
+  filter(time > 0) %>%
+  mutate(lap = gsub("_.*$","",ref)) %>%
+  mutate(station = sub(".*_","",ref)) %>%
+  mutate(ref = gsub(lap,"",ref))%>%
+  mutate(ref = gsub(st[1],"",ref))%>%
+  mutate(ref = gsub(st[2],"",ref))%>%
+  mutate(ref = mapply(function(x,y)gsub(x,"",y) ,gsub(" ", "|",st[1]),ref)) %>%
+  mutate(ref = mapply(function(x,y)gsub(x,"",y) ,gsub(" ", "|",st[2]),ref)) %>%
+  mutate(ref = gsub("_","",ref)) %>%
+  mutate(ref = gsub('[0-9]+', '',ref)) %>%
+  filter(station %in% st) %>%
+  arrange(No_,station,time) %>%
+  group_by(No_,station) %>%
+  mutate(cycle = ifelse(ref == "Arrival",time - lag(time),0)) %>%
+  mutate(cycle = ifelse(ref == "Start",lead(cycle),cycle)) %>%
+  mutate(Stop_ = gsub("].*$","",Stop_)) %>%
+  mutate(Stop_ = sub(".*:","",Stop_)) %>%
+  mutate(Stop_ = as.numeric(Stop_)) %>%
+  rename(stop_id = "Stop_") %>%
+  tidyr::fill(cycle,.direction="up") %>%
+  tidyr::fill(cycle,.direction="down") %>%
+  mutate(stop_sequence = ifelse(station == st[1],1,NA))
+
+aux <- aux %>%
+  filter(stop_sequence == 1) %>%
+  mutate(route_id = gsub(" .*$","",sheets[i])) %>%
+  mutate(day = sub(".* ","",sheets[i]))
+  
+i <- i + 1
+
+data <- data %>% bind_rows(aux)
+
+print(paste0(gsub(" .*$","",sheets[i]),"-",i,"/",length(sheets)))
+
+}
+
+#### Consolidate all timetables ####
+
+# cleaning up
+timetables <- data %>% 
+  mutate(ref = gsub("-р","",ref)) %>%
+  mutate(ref = gsub(" ","",ref)) %>%
+  mutate(cycle = round(cycle,8)) %>%
+  ungroup() %>%
+  spread(key="ref",value="time") %>%
+  mutate(Arrival = ifelse(is.na(Arrival),Start,Arrival)) %>%
+  filter(!is.na(Start)) %>%
+  rename(arrival_time = "Arrival",
+         departure_time = "Start",
+         service_id = "day") %>%
+  mutate(route_id = case_when(substr(route_id,1,2) == "Ch" ~ paste0("Ч:",gsub("Ch","",route_id)),
+                              substr(route_id,1,1) == "M" ~ paste0("М:",gsub("M","",route_id)),
+                              substr(route_id,1,1) == "X" ~ paste0("Х:",gsub("X","",route_id)),
+                              substr(route_id,1,1) == "Y" ~ paste0("Ү:",gsub("Y","",route_id)),
+                              TRUE ~ route_id)) %>%
+  mutate(route_id = gsub("а|a|a","А",route_id),
+         route_id = gsub("b|б|б","Б",route_id)) %>%
+  select(-c(stop_id,station))%>%
+  filter(stop_sequence == 1)%>%
+  mutate(service_id = gsub("W","w",service_id)) %>%
+  group_by(route_id) %>%
+  mutate(trip_id = paste0(route_id,"_",row_number())) %>%
+  select(-No_)
+
+rm(aux,timetable)
+
+```
+
+# 5. Create stop_times based on the itinerary and timetables
+```{r stop_times}
+
+aux <- timetables %>% 
+  group_by(route_id,service_id)%>%
+  summarise(n = n()) %>%
+  ungroup()
+
+# Expand the itineraries to create one sequence for each trip
+aux <- stop_times %>%
+  ungroup() %>%
+  left_join(timetables,by=c("route_id"),relationship = "many-to-many") %>%
+  mutate_at(c("arrival_time","departure_time"),~(p=ifelse(stop_sequence.x == stop_sequence.y,.,NA))) %>%
+  select(-stop_sequence.y) %>%
+  rename(stop_sequence = "stop_sequence.x") %>%
+  arrange(trip_id,stop_sequence) %>%
+  group_by(trip_id) %>%
+  mutate(n = max(stop_sequence)) %>%
+  ungroup() %>%
+  arrange(trip_id,stop_sequence) %>%
+  fill(departure_time,.direction = "down") %>%
+  fill(cycle,.direction = "down")  %>%
+  mutate(arrival_time = ifelse(stop_sequence == "1", arrival_time,departure_time)) %>%
+  mutate(arrival_time = ifelse(stop_sequence != 1,arrival_time+cycle/n*stop_sequence,arrival_time),
+         departure_time = ifelse(stop_sequence != 1,departure_time+cycle/n*stop_sequence,departure_time))
+
+# Create list of all trips
+trips <- aux %>% select(route_id,service_id,trip_id) 
+trips <- trips[!duplicated(trips),]
+
+# Organize the stop_times table
+stop_times <- aux %>%
+  select(trip_id,arrival_time,departure_time,stop_id,stop_sequence) %>%
+  group_by(trip_id) %>%
+  mutate(timepoint = ifelse(stop_sequence == 1 | stop_sequence == max(stop_sequence),1,0)) %>%
+  mutate(arrival_time = arrival_time*3600*24) %>%
+  mutate(arrival_time_h = trunc(arrival_time/3600)) %>%
+  mutate(arrival_time_m = trunc((arrival_time - arrival_time_h*3600)/60)) %>%
+  mutate(arrival_time_s = trunc(arrival_time - arrival_time_h*3600 - arrival_time_m*60)) %>%
+  mutate_at(c("arrival_time_h","arrival_time_m","arrival_time_s"),~(p = ifelse(. < 10,paste0("0",.),as.character(.)))) %>%
+  mutate(arrival_time = paste0(arrival_time_h,":",arrival_time_m,":",arrival_time_s)) %>%
+  mutate(departure_time = departure_time*3600*24) %>%
+  mutate(departure_time_h = trunc(departure_time/3600)) %>% 
+  mutate(departure_time_m = trunc((departure_time - departure_time_h*3600)/60)) %>%
+  mutate(departure_time_s = trunc(departure_time - departure_time_h*3600 - departure_time_m*60)) %>%
+  mutate_at(c("departure_time_h","departure_time_m","departure_time_s"),~(p = ifelse(. < 10,paste0("0",.),as.character(.)))) %>%
+  mutate(departure_time = paste0(departure_time_h,":",departure_time_m,":",departure_time_s)) %>%
+  select(trip_id,arrival_time,departure_time,stop_id,stop_sequence,timepoint)
+  
+# Create calendar
+calendar <- tibble(service_id = c("weekday","weekend"),
+                   monday = c(1,0),tuesday = c(1,0), wednesday = c(1,0), thursday = c(1,0), friday = c(1,0), saturday = c(0,1), sunday = c(0,1),
+                   start_date = "20240101", end_date = "20241231")
+
+rm(aux)
+
+```
+
+# 6. Wrapping up
+```{r gtfs_final}
+
+# Creating the GTFS
+gtfs <- NULL
+gtfs[["stops"]] <- stops  
+gtfs[["stop_times"]] <- stop_times
+gtfs[["routes"]] <- routes
+gtfs[["trips"]] <- trips
+gtfs[["calendar"]] <- calendar
+gtfs[["agency"]] <- agency
+
+gtfs <- as_tidygtfs(gtfs)
+
+# Exporting it
+write_gtfs(gtfs,"Network/gtfs2024.zip")
+
+```
+
+# 7. Create hexagonal grid
+```{r taz_hx}
+
+taz <- st_read("Household Travel Survey/TAZ/TAZ.shp") %>% st_transform(4326) %>% st_buffer(0) %>% select(Code)
+
+# Projections
+CRSlatlong <- "+proj=longlat +datum=WGS84 +no_defs"
+utm_proj <- "+proj=utm +zone=48 +datum=WGS84 +units=m +ellps=WGS84 +towgs84=0,0,0"
+
+# Bounding Box
+mun <- as(taz, 'Spatial') %>% spTransform(utm_proj)
+boundingbox <- as(raster::extent(bbox(mun)), "SpatialPolygons")
+
+# Create hexagonal grid
+HexPts <- spsample(boundingbox, type="hexagonal", offset=c(0.5, 0.5), cellsize=500)
+HexPols <- HexPoints2SpatialPolygons(HexPts)
+
+# CRS Transformations
+crs(HexPols) <- utm_proj
+HexPols <- spTransform(HexPols, CRS(utm_proj))
+
+# Get only polygons inside municipality borders
+hex_poly <- raster::intersect(mun,HexPols)
+
+# Create ID
+hex_poly@data$ID <- 1:nrow(hex_poly@data) %>% as.numeric()
+row.names(hex_poly@data) <- 1:nrow(hex_poly@data) %>% as.character()
+hex_poly@data <- hex_poly@data[1]
+
+# Transformations
+hex_poly <- spTransform(hex_poly,CRS(CRSlatlong))
+hex_poly <- st_as_sf(hex_poly)
+
+hx <- hex_poly %>%
+  mutate("GEO_ID" = row_number()) %>%
+  rename(TAZ = "Code") %>%
+  mutate(area_hex = as.numeric(st_area(.))) %>%
+  group_by(TAZ) %>%
+  mutate(area_taz = sum(area_hex,na.rm=T)) %>%
+  ungroup() %>%
+  mutate(factor = area_hex/area_taz) %>%
+  select(-c(area_hex,area_taz))
+
+# hx %>% st_write("_temp/taz_hex500.shp",delete_layer=T)
+
+rm(hex_poly,HexPols,CRSlatlong,utm_proj,HexPts)
+
+```
+
+# 8. Get Household Travel Survey data
+```{r data}
+
+hx <- st_read("_temp/taz_hex500.shp")
+
+# Read Household Travel Survey data
+survey <- read_xlsx("Household Travel Survey/Household travel survey excel data.xlsx")[-1,]
+survey <- survey[,-87]
+survey <- row_to_names(survey,row_number = 1)
+survey <- survey %>% filter(!is.na(TAZ))
+
+# Organize data on jobs and schools
+data <- survey %>%
+  rename(pop = "Total population",
+         jobs = "Number of vacancies",
+         students = "Number of school students") %>%
+  mutate_all(as.numeric) %>%
+  mutate(wap = `Population age /15-29/` + `Population age /30-44/` + `Population age /45-60/`) %>%
+  select(TAZ,pop,wap,jobs,students,S_T_O,S_C_O,S_P_O) %>%
+  mutate(S_C_O_p = S_C_O/S_T_O,
+         S_P_O_p = S_P_O/S_T_O)
+data[is.na(data)] <- 0
+
+# Get the location of hospitals and schools
+hex_data <- hx %>%
+  left_join(data,by="TAZ") %>%
+  mutate_at(c("pop","jobs","students","wap"),~(p=factor*.))
+
+hospitals <- st_read("Shape files/Hospitals_in_UB.shp") %>% st_transform(4326) %>% select(OBJECTID) %>%
+  st_join(hx) %>%
+  st_drop_geometry() %>%
+  group_by(GEO_ID) %>%
+  summarise(hospitals = n())
+  
+schools <- st_read("Shape files/Schools_in_UB.shp") %>% st_transform(4326) %>% select(OBJECTID_1,CAPACITY) %>%
+  st_join(hx) %>%
+  st_drop_geometry() %>%
+  group_by(GEO_ID) %>%
+  summarise(schools = n(),
+            capacity_schools = sum(as.numeric(CAPACITY),na.rm=T))
+
+# Read World pop data and redistribute to the hexagonal grid
+worldpop <- read_csv("worldpop_grid.csv") %>%
+  group_by(fid) %>%
+  mutate(pop = DN*area/sum(area,na.rm=T)) %>%
+  ungroup() %>%
+  group_by(GEO_ID) %>%
+  summarise(pop_wp = round(sum(pop,na.rm=T)))
+
+# Join everything
+hex_data <- hex_data %>%
+  left_join(hospitals,by="GEO_ID") %>%
+  left_join(schools,by="GEO_ID") %>%
+  left_join(worldpop,by="GEO_ID")
+hex_data[is.na(hex_data)] <- 0
+
+hex_data %>% st_drop_geometry() %>% summarise_all(sum)
+
+```
+
+# 9. Maps of opportunities
+```{r opportunities}
+
+base <- hex_data
+
+# Uploading useful maps
+mun <- st_read("Household Travel Survey/TAZ/TAZ.shp")
+mask <- st_read("Shape files/worldpop.shp") %>% filter(DN <= 2)
+
+# Function to create accessibility maps in a standard format
+PlotMap <- function() {
+  
+  # Plot map
+  ggplot() +
+    geom_sf(data = base, aes(fill = breaks),color=NA)  +
+    theme(
+      axis.line = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.title = element_blank(),
+      plot.subtitle = element_blank(),
+      legend.title = element_text(size = 12, color = "#4e4d47"),
+      legend.text = element_text(size = 10, hjust = 0, color = "#4e4d47",family="A"),
+      legend.background = element_rect(fill = alpha('white', 0.5)),
+      legend.position = pos_leg) +
+    scale_fill_manual(
+      values = rev(magma(10)),
+      breaks = rev(breaks_scale),
+      name = name_variable,
+      na.value = "transparent",
+      drop = FALSE,
+      labels = rev(labels),
+      guide = guide_legend(
+        direction = "horizontal",
+        keyheight = unit(4, units = "mm"),
+        keywidth = unit(10, units = "mm"),
+        title.position = 'top',
+        title.hjust = 0.5,
+        label.hjust = 1,
+        nrow = 1,
+        byrow = T,
+        reverse = T,
+        label.position = "bottom")) +
+    geom_sf(data = mask, mapping = aes(),fill = "grey95",color="grey95",size=0.01) +
+    #geom_sf(data = transport, mapping = aes(), color = "#606060", size = 0.6) +
+    geom_sf(data = mun, mapping=aes(), fill = "transparent", size = 0.1, color = "white") +
+    coord_sf(xlim=c(106.6,107.2),ylim=c(47.75,48.1)) +
+    ggsn::scalebar(data = base, dist = 7, st.color = "#4e4d47", st.size=3, box.fill = c("#4e4d47","#f0f0f0"), box.color = "#4e4d47", border.size = 0.1, height=0.015, dist_unit = "km", location = "bottomright", model = 'WGS84',transform = TRUE,anchor = c(x=107.2,y=47.75))
+}
+
+# Define the legend breaks 
+breaks <- c(0,10,100,500,1000,2000,4000,6000)
+labels <- c(10,100,500,1000,2000,4000,6000)
+pos_leg <- c(0.69,0.2)
+
+# Plot maps  - Jobs
+variable <- base$jobs
+name_variable <- "Jobs"
+threshold <- "jobs"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+# Plot maps  - Schools
+variable <- base$cpcty_s
+name_variable <- "School vacancies"
+threshold <- "schools"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+# Define the legend breaks 
+breaks <- c(0,1,2,3,4,5,6,7)
+labels <- c(1,2,3,4,5,6,7)
+
+# Plot maps  - Hospitals
+variable <- base$hosptls
+name_variable <- "Hospitals"
+threshold <- "hospitals"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+# Define the legend breaks 
+breaks <- c(0,100,400,800,1200,2000,3500,5000)
+labels <- c("100","400","800","1,200","2,000","3,500","5,000")
+
+# Plot maps  - Population
+variable <- base$pop_wp
+name_variable <- "Population"
+threshold <- "pop"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+
+```
+
+# 10. Map of access to transport
+```{r pnt}
+
+sf_use_s2(FALSE)
+
+# Calculate the area of each polygon
+base <- hex_data %>%
+  mutate(area = as.numeric(st_area(.))) %>%
+  st_buffer(0)
+
+# Read the gtfs again (in case you already saved it)
+gtfs <- read_gtfs("Network/gtfs2024.zip")
+
+# Create a 500-meter buffer around the stops
+stops <- gtfs[["stops"]] %>%
+  st_as_sf(coords = c("stop_lon","stop_lat"),crs = 4326) %>%
+  st_transform(32646) %>%
+  st_buffer(500) %>%
+  st_transform(4326) %>%
+  summarize()
+
+# Perform the intersection between the hexagons with the population and the buffer around stops
+inter <- st_intersection(base,stops) %>%
+  mutate(area_buffer = as.numeric(st_area(.))) %>%
+  mutate(pop = pop_wp*area_buffer/area) %>%
+  select(pop)
+
+# Some statistics
+sum(inter$pop,na.rm=T)
+sum(inter$pop,na.rm=T)/sum(base$pop_wp,na.rm=T)
+
+# Uploading useful maps
+mun <- st_read("Household Travel Survey/TAZ/TAZ.shp")
+mask <- st_read("Shape files/worldpop.shp") %>% filter(DN <= 2)
+
+# Function to create accessibility maps in a standard format
+PlotMap <- function() {
+  
+  # Plot map
+  ggplot() +
+    geom_sf(data = base, aes(fill = breaks),color=NA)  +
+    theme(
+      axis.line = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.title = element_blank(),
+      plot.subtitle = element_blank(),
+      legend.title = element_text(size = 12, color = "#4e4d47"),
+      legend.text = element_text(size = 10, hjust = 0, color = "#4e4d47",family="A"),
+      legend.background = element_rect(fill = alpha('white', 0.5)),
+      legend.position = pos_leg) +
+    scale_fill_manual(
+      values = rev(magma(10)),
+      breaks = rev(breaks_scale),
+      name = name_variable,
+      na.value = "transparent",
+      drop = FALSE,
+      labels = rev(labels),
+      guide = guide_legend(
+        direction = "horizontal",
+        keyheight = unit(4, units = "mm"),
+        keywidth = unit(10, units = "mm"),
+        title.position = 'top',
+        title.hjust = 0.5,
+        label.hjust = 1,
+        nrow = 1,
+        byrow = T,
+        reverse = T,
+        label.position = "bottom")) +
+    geom_sf(data = mask, mapping = aes(),fill = "grey95",color="grey95",size=0.01) +
+    geom_sf(data = inter, mapping = aes(),fill = "grey95",color="transparent") +
+    #geom_sf(data = transport, mapping = aes(), color = "#606060", size = 0.6) +
+    geom_sf(data = mun, mapping=aes(), fill = "transparent", size = 0.1, color = "white") +
+    coord_sf(xlim=c(106.6,107.2),ylim=c(47.75,48.1)) +
+    ggsn::scalebar(data = base, dist = 7, st.color = "#4e4d47", st.size=3, box.fill = c("#4e4d47","#f0f0f0"), box.color = "#4e4d47", border.size = 0.1, height=0.015, dist_unit = "km", location = "bottomright", model = 'WGS84',transform = TRUE,anchor = c(x=107.2,y=47.75))
+}
+
+# Define the legend breaks 
+breaks <- c(0,10,100,500,1000,2000,4000,6000)
+labels <- c(10,100,500,1000,2000,4000,6000)
+pos_leg <- c(0.69,0.2)
+
+# Plot maps  - Population
+variable <- base$pop_wp
+name_variable <- "Population with low access to transport"
+threshold <- "pop_pnt500_priority"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+```
+
+# 11. Connectivity of transport network
+```{r frequency}
+
+# Read the gtfs we created
+gtfs <- read_gtfs("gtfs2024.zip")
+
+# Discover the service_id associated with week days
+gtfs[["calendar"]] %>%
+  filter(tuesday == 1)
+
+# Get only the departures of each route
+stop_times <- gtfs[["stops"]] %>% left_join(gtfs[["stop_times"]],by="stop_id") %>%
+  filter(service_id == "weekday") %>%
+  left_join(gtfs[["trips"]],by="trip_id") %>%
+  group_by(route_id,stop_sequence) %>%
+  filter(row_number() == 1)
+
+# Count the number of departures by hour (and also the headway)
+frequency <- gtfs[["stop_times"]] %>%
+  filter(stop_sequence == 1) %>%
+  left_join(gtfs[["trips"]],by="trip_id") %>%
+  mutate(hour = substr(departure_time,1,2)) %>%
+  group_by(route_id,hour) %>%
+  summarise(n = n()) %>%
+  mutate(headway = 60/n)
+
+# Get some statistics
+frequency %>%
+  group_by(hour) %>%
+  summarise(n = sum(n)) %>%
+  arrange(desc(n))
+
+# Create a simplified itinerary by simply connecting subsequent stops
+stop_times <- points_to_line(stop_times,"stop_lon","stop_lat","route_id","stop_sequence") %>% st_as_sf() %>%
+  st_set_crs(4326) %>%
+  mutate(route_id=unique(stop_times$route_id)) %>%
+  left_join(frequency,by="route_id")
+
+#stop_times %>% write_csv("_temp/frequency.csv")
+
+# Filter the hour we want to map
+base <- stop_times %>% filter(hour == "21") 
+
+# Uploading useful maps
+mun <- st_read("Household Travel Survey/TAZ/TAZ.shp")
+mask <- st_read("Shape files/worldpop.shp") %>% filter(DN <= 2)
+
+# Function to create accessibility maps in a standard format
+PlotMap_lines <- function() {
+  
+  # Plot map
+  ggplot() +
+    geom_sf(data = base, aes(color = breaks),linewidth=1,alpha=0.7)  +
+    theme(
+      axis.line = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.title = element_blank(),
+      plot.subtitle = element_blank(),
+      legend.title = element_text(size = 12, color = "#4e4d47"),
+      legend.text = element_text(size = 10, hjust = 0, color = "#4e4d47",family="A"),
+      legend.background = element_rect(fill = alpha('white', 0.5)),
+      legend.position = pos_leg) +
+    scale_color_manual(
+      values = rev(viridis(7)),
+      breaks = rev(breaks_scale),
+      name = name_variable,
+      na.value = "transparent",
+      drop = FALSE,
+      labels = rev(labels),
+      guide = guide_legend(
+        direction = "horizontal",
+        keyheight = unit(4, units = "mm"),
+        keywidth = unit(10, units = "mm"),
+        title.position = 'top',
+        title.hjust = 0.5,
+        label.hjust = 1,
+        nrow = 1,
+        byrow = T,
+        reverse = T,
+        label.position = "bottom")) +
+    #scale_alpha_manual(values = rev(seq(0.3,0.9,0.1))) +
+    #guides(alpha="none") +
+    geom_sf(data = mask, mapping = aes(),fill = "grey95",color="grey95",size=0.01) +
+    #geom_sf(data = transport, mapping = aes(), color = "#606060", size = 0.6) +
+    geom_sf(data = mun, mapping=aes(), fill = "transparent", size = 0.1, color = "white") +
+    coord_sf(xlim=c(106.6,107.2),ylim=c(47.75,48.1)) +
+    ggsn::scalebar(data = base, dist = 7, st.color = "#4e4d47", st.size=3, box.fill = c("#4e4d47","#f0f0f0"), box.color = "#4e4d47", border.size = 0.1, height=0.015, dist_unit = "km", location = "bottomright", model = 'WGS84',transform = TRUE,anchor = c(x=107.2,y=47.75))
+}
+
+# Define the legend breaks 
+breaks <- c(0,3,5,7,10,12,15,100)
+labels <- c("3","5","7",'10',"12","15","30") 
+pos_leg <- c(0.69,0.2)
+
+# Plot maps
+variable <- base$headway
+name_variable <- "Headway (min) | 9 pm"
+threshold <- "headway21"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8]) %>% factor(levels = (breaks)[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap_lines()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+```
+
+# 12. Travel time matrices
+```{r travel_time_matrix_peak}
+
+# Set origins and destinations 
+origin <- hx %>%
+  st_centroid() %>%
+  st_coordinates() %>%
+  as_tibble() %>%
+  cbind(GEO_ID = hx$GEO_ID) %>%
+  select(GEO_ID,X,Y) %>%
+  mutate(GEO_ID = as.numeric(GEO_ID)) %>%
+  arrange(GEO_ID)
+colnames(origin) <- c("id","lon","lat")
+destination <- origin
+
+# Get elevation
+#box <- st_bbox(hx)
+#elevat <- get_elev_raster(hx,z=14)
+#writeRaster(elevat,"Network/elevation.tiff")
+
+# Get OSM data from https://download.geofabrik.de/asia/mongolia.html
+
+r5r_core <- setup_r5(data_path = "Network", verbose = FALSE)
+
+# Define departure time
+departure_datetime <- as.POSIXct("17-04-2024 21:00:00",format = "%d-%m-%Y %H:%M:%S","Asia/Ulaanbaatar")
+#intervals <- c(0,15,30,45,60)*60
+#i <- intervals[1]
+i <- 0
+
+dp <- departure_datetime + i
+ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = origin,
+                          destinations = destination,
+                          mode = mode,
+                          departure_datetime = dp,
+                          max_trip_duration = max_trip_duration,
+                          verbose = FALSE) %>%
+  mutate(time = i)
+
+# Save the time travel matrix
+write_csv(ttm,paste0("_temp/ttm_peak_21_",i,".csv"))
+
+rm(ttm,origin,destination,r5r_core)
+gc()
+
+# Read it back into r and calculate the median travel time (if you ran multiple time travel matrices within the interval)
+list.files("_temp",pattern="ttm_peak_8",full.names = T) %>% map_df(read_csv) %>%
+  group_by(from_id,to_id) %>%
+  summarise(travel_time=median(travel_time_p50,na.rm=T)) %>% saveRDS("_temp/peak_matrix_final_8.rds")
+
+```
+
+# 13. Cumulative accessibility
+```{r access_cum}
+
+# Join travel time matrix with the database by destination
+hex <- readRDS("_temp/peak_matrix_final_8.rds")
+
+# Calculate the number of opportunities reached within 30, 45, 60 and 90 minutes
+hex <- hex %>%
+  mutate(GEO_ID_i = as.numeric(from_id), GEO_ID_j = as.numeric(to_id)) %>%
+  ungroup() %>%
+  select(-c(from_id,to_id)) %>%
+  left_join(hex_data %>%
+              rename(GEO_ID_j = "GEO_ID") %>%
+              st_drop_geometry() %>%
+              select(GEO_ID_j,jobs,hospitals,capacity_schools), by="GEO_ID_j") %>%
+  rename(time = "travel_time") %>%
+  mutate(time30_jobs = ifelse(time <= 30,jobs,0),
+         time45_jobs = ifelse(time <= 45,jobs,0),
+         time60_jobs = ifelse(time <= 60,jobs,0),
+         time90_jobs = ifelse(time <= 90,jobs,0),
+         time30_capacity_schools = ifelse(time <= 30,capacity_schools,0),
+         time45_capacity_schools = ifelse(time <= 45,capacity_schools,0),
+         time60_capacity_schools = ifelse(time <= 60,capacity_schools,0),
+         time90_capacity_schools = ifelse(time <= 90,capacity_schools,0),
+         time30_hospitals = ifelse(time <= 30,hospitals,0),
+         time45_hospitals = ifelse(time <= 45,hospitals,0),
+         time60_hospitals = ifelse(time <= 60,hospitals,0),
+         time90_hospitals = ifelse(time <= 90,hospitals,0),) %>%
+  group_by(GEO_ID_i) %>%
+  summarise_all(.,~(p=sum(.,na.rm=T))) %>%
+  select(-c("GEO_ID_j","time","jobs","hospitals","capacity_schools"))
+
+# Divide the number of opportunities reached within each time threshold by the number of opportunities in the region (to get the %)
+hex <- hex %>%
+  mutate_at(c("time30_jobs","time45_jobs","time60_jobs","time90_jobs"),~(p = ./sum(hex_data$jobs,na.rm = T))) %>%
+  mutate_at(c("time30_capacity_schools","time45_capacity_schools","time60_capacity_schools","time90_capacity_schools"),~(p = ./sum(hex_data$capacity_schools,na.rm = T))) %>%
+  mutate_at(c("time30_hospitals","time45_hospitals","time60_hospitals","time90_hospitals"),~(p = ./sum(hex_data$hospitals,na.rm = T)))
+
+# Join all the data
+access <- hex_data %>%
+  left_join(hex,by=c("GEO_ID"="GEO_ID_i"))
+
+# And export it to a shapefile
+access %>% st_write("G:/Meu Drive/World Bank/Ulaanbaatar/accessibility.shp",delete_layer=T)
+
+```
+
+# 14. Maps of accessibility
+```{r functions}
+
+# You can read the accessibility database back into R to next analyses
+base <- st_read("G:/Meu Drive/World Bank/Ulaanbaatar/accessibility.shp")
+
+# Uploading useful maps
+mun <- st_read("Household Travel Survey/TAZ/TAZ.shp")
+mask <- st_read("Shape files/worldpop.shp") %>% filter(DN <= 2)
+
+# Function to create accessibility maps in a standard format
+PlotMap <- function() {
+  
+  # Plot map
+ggplot() +
+    geom_sf(data = base, aes(fill = breaks),color=NA)  +
+    theme(
+      axis.line = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.title = element_blank(),
+      plot.subtitle = element_blank(),
+      legend.title = element_text(size = 12, color = "#4e4d47"),
+      legend.text = element_text(size = 10, hjust = 0, color = "#4e4d47",family="A"),
+      legend.background = element_rect(fill = alpha('white', 0.5)),
+      legend.position = pos_leg) +
+    scale_fill_manual(
+      values = rev(magma(10)),
+      breaks = rev(breaks_scale),
+      name = name_variable,
+      na.value = "transparent",
+      drop = FALSE,
+      labels = rev(labels),
+      guide = guide_legend(
+        direction = "horizontal",
+        keyheight = unit(4, units = "mm"),
+        keywidth = unit(10, units = "mm"),
+        title.position = 'top',
+        title.hjust = 0.5,
+        label.hjust = 1,
+        nrow = 1,
+        byrow = T,
+        reverse = T,
+        label.position = "bottom")) +
+    geom_sf(data = mask, mapping = aes(),fill = "grey95",color="grey95",size=0.01) +
+    #geom_sf(data = transport, mapping = aes(), color = "#606060", size = 0.6) +
+    geom_sf(data = mun, mapping=aes(), fill = "transparent", size = 0.1, color = "white") +
+    coord_sf(xlim=c(106.6,107.2),ylim=c(47.75,48.1)) +
+    ggsn::scalebar(data = base, dist = 7, st.color = "#4e4d47", st.size=3, box.fill = c("#4e4d47","#f0f0f0"), box.color = "#4e4d47", border.size = 0.1, height=0.015, dist_unit = "km", location = "bottomright", model = 'WGS84',transform = TRUE,anchor = c(x=107.2,y=47.75))
+}
+
+# Define legend breaks 
+breaks <- c(0,0.05,0.1,0.2,0.4,0.6,0.8,1)
+labels <- c("5%","10%","20%","40%",'60%',"80%","100%") 
+pos_leg <- c(0.69,0.2)
+
+# Plot maps - Jobs
+variable <- base$tm30_jb
+name_variable <- "30-min. accessibility | Jobs"
+threshold <- "tm30_jb"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+variable <- base$tm45_jb
+name_variable <- "45-min. accessibility | Jobs"
+threshold <- "tm45_jb"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+variable <- base$tm60_jb
+name_variable <- "60-min. accessibility | Jobs"
+threshold <- "tm60_jb"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+variable <- base$tm90_jb
+name_variable <- "90-min. accessibility | Jobs"
+threshold <- "tm90_jb"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+# Plot maps - Hospitals
+variable <- base$tm30_hs
+name_variable <- "30-min. accessibility | Hospitals"
+threshold <- "tm30_hs"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+variable <- base$tm45_hs
+name_variable <- "45-min. accessibility | Hospitals"
+threshold <- "tm45_hs"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+variable <- base$tm60_hs
+name_variable <- "60-min. accessibility | Hospitals"
+threshold <- "tm60_hs"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+variable <- base$tm90_hs
+name_variable <- "90-min. accessibility | Hospitals"
+threshold <- "tm90_hs"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+# Plot maps - Schools (capacity)
+variable <- base$tm30_c_
+name_variable <- "30-min. accessibility | Schools"
+threshold <- "tm30_cs"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+variable <- base$tm45_c_
+name_variable <- "45-min. accessibility | Schools"
+threshold <- "tm45_cs"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+variable <- base$tm60_c_
+name_variable <- "60-min. accessibility | Schools"
+threshold <- "tm60_cs"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+xsvariable <- base$tm90_c_
+name_variable <- "90-min. accessibility | Schools"
+threshold <- "tm90_cs"
+base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+breaks_scale <- levels(base$breaks) %>% as.numeric()  
+PlotMap()
+ggsave(paste0("Outputs/ac_",threshold,".jpeg"),dpi=600,height = 5,width=5.5)
+
+```
+
